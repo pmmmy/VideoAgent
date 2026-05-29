@@ -17,9 +17,6 @@ from .base_agent import AgentInterface
 
 logger = logging.getLogger(__name__)
 
-# ─── 幕名 ───
-ACT_NAMES = {1: "激励事件", 2: "进入新世界", 3: "灵魂黑夜", 4: "高潮决战"}
-
 def _get_shot_prompt(lang: str = "zh") -> str:
     from prompts.loader import load_prompt_with_fallback
     return load_prompt_with_fallback("storyboard", "shot", lang, "zh")

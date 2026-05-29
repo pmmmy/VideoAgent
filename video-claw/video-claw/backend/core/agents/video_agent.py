@@ -101,12 +101,18 @@ class VideoDirectorAgent(AgentInterface):
 
     # ─── 提示词组装 ───
 
-    def _assemble_prompt(self, segment: dict, style_prompt: str) -> str:
+    def _assemble_prompt(self, segment: dict, style_prompt: str, video_data: Optional[dict]=None) -> str:
         """组装视频提示词
         格式：
         风格控制：用户选择的风格提示词, 电影质感
         分镜列表：分镜1:[时长] content... 分镜2:[时长] content...
         """
+        # 如果 video_data 中有 description，则优先使用
+        # 前端修改后的提示词会存入 artifacts.video_generation.clips.description
+        if video_data and "description" in video_data:
+            return video_data["description"]
+
+        # 否则从 segment 中组装
         prompt = f"风格控制：{style_prompt}\n"
         prompt += "分镜列表："
         
@@ -115,7 +121,9 @@ class VideoDirectorAgent(AgentInterface):
             dur = shot.get("duration", 5)
             content = shot.get("content", "").strip()
             prompt += f"\n分镜{i}：[{dur}秒] {content}"
-            
+
+        prompt += "\n不要生成字幕或水印"
+
         return prompt
 
     def _get_style_keywords(self, session_data: dict) -> str:
@@ -275,9 +283,10 @@ class VideoDirectorAgent(AgentInterface):
         segments = []
         for ep in episodes:
             segments.extend(ep.get("segments", []))
-            
         if not segments:
             raise Exception("未找到分镜片段数据，请先完成阶段3")
+        
+        video_clips = artifacts.get('video_generation', {}).get('clips', [])
 
         # 2. 获取参考图路径映射 (从 Reference Generation)
         ref_art = artifacts.get('reference_generation', {})
@@ -305,6 +314,7 @@ class VideoDirectorAgent(AgentInterface):
             if regen_ids:
                 self._report_progress("视频生成", "重新生成中...", 5)
                 segment_map = {s['segment_id']: s for s in segments}
+                clip_map = {c['id']: c for c in video_clips}
                 
                 def regen_run():
                     done = 0
@@ -312,8 +322,15 @@ class VideoDirectorAgent(AgentInterface):
                         futs = {}
                         for seg_id in regen_ids:
                             seg = segment_map.get(seg_id)
+                            clip = clip_map.get(seg_id) if clip_map.get(seg_id) else None
                             if not seg: continue
-                            prompt = self._assemble_prompt(seg, style_prompt)
+                            prompt = self._assemble_prompt(seg, style_prompt, video_data=clip)
+
+                            print("#"*100)
+                            print(clip)
+                            print(prompt)
+                            return
+
                             img_path = self._get_reference_image(sid, seg_id, scene_map)
                             duration = seg.get("total_duration", 10)
                             fut = executor.submit(

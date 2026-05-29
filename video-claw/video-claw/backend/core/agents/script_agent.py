@@ -153,7 +153,25 @@ class ScriptWriterAgent(AgentInterface):
                 sequel_idea=sequel_idea,
                 start_episode_num=last_episode_num + 1
             )
+            
+            _log_progress(45, "正在生成续写初稿...")
             sequel_script_text = await loop.run_in_executor(None, self._cancellable_query, llm, prompt, [], llm_model, True, sid, web_search)
+
+            _log_progress(50, "正在进行台词评估...")
+            eval_dialogue_prompt = _get_script_prompt("eval_dialogue", "zh" if is_zh else "en").format(script_text=sequel_script_text)
+            dialogue_critique = await loop.run_in_executor(None, self._cancellable_query, llm, eval_dialogue_prompt, [], llm_model, True, sid, web_search)
+            
+            _log_progress(55, "正在进行情节评估...")
+            eval_plot_prompt = _get_script_prompt("eval_plot", "zh" if is_zh else "en").format(script_text=sequel_script_text)
+            plot_critique = await loop.run_in_executor(None, self._cancellable_query, llm, eval_plot_prompt, [], llm_model, True, sid, web_search)
+            
+            _log_progress(58, "正在根据评估意见优化续写内容...")
+            revise_prompt = _get_script_prompt("revise_script", "zh" if is_zh else "en").format(
+                script_text=sequel_script_text, 
+                dialogue_critique=dialogue_critique, 
+                plot_critique=plot_critique
+            )
+            sequel_script_text = await loop.run_in_executor(None, self._cancellable_query, llm, revise_prompt, [], llm_model, True, sid, web_search)
 
             _log_progress(60, "提取新增人物/场景...")
             meta_prompt = _get_script_prompt("meta_extract_sequel", "zh").format(
@@ -263,14 +281,31 @@ class ScriptWriterAgent(AgentInterface):
                 logger.info(f"[{pct}%] {msg}")
 
             # 1. Generate full script
-            _log_progress(10, "正在生成完整剧本文本...")
-            prompt_name = "generate_script"
-            prompt = _get_script_prompt(prompt_name, "zh" if is_zh else "en").format(idea=idea, style=style, episodes=episodes)
+            _log_progress(10, "正在生成完整剧本文本初稿...")
+            prompt = _get_script_prompt("generate_script", "zh" if is_zh else "en").format(idea=idea, style=style, episodes=episodes)
 
             loop = asyncio.get_running_loop()
             full_script_text = await loop.run_in_executor(None, self._cancellable_query, llm, prompt, [], llm_model, True, sid, web_search)
-            logger.info(f"[ScriptWriter] Full script generated ({len(full_script_text)} chars)")
-            _log_progress(40, "原稿生成完成，正在提取人物/场景信息...")
+            logger.info(f"[ScriptWriter] Initial script generated ({len(full_script_text)} chars)")
+            
+            _log_progress(20, "正在进行台词评估...")
+            eval_dialogue_prompt = _get_script_prompt("eval_dialogue", "zh" if is_zh else "en").format(script_text=full_script_text)
+            dialogue_critique = await loop.run_in_executor(None, self._cancellable_query, llm, eval_dialogue_prompt, [], llm_model, True, sid, web_search)
+            
+            _log_progress(30, "正在进行情节评估...")
+            eval_plot_prompt = _get_script_prompt("eval_plot", "zh" if is_zh else "en").format(script_text=full_script_text)
+            plot_critique = await loop.run_in_executor(None, self._cancellable_query, llm, eval_plot_prompt, [], llm_model, True, sid, web_search)
+            
+            _log_progress(40, "正在根据评估意见优化剧本...")
+            revise_prompt = _get_script_prompt("revise_script", "zh" if is_zh else "en").format(
+                script_text=full_script_text, 
+                dialogue_critique=dialogue_critique, 
+                plot_critique=plot_critique
+            ) + prompt  # 将原始生成提示词追加到优化提示词末尾，提供更多上下文信息帮助优化
+            full_script_text = await loop.run_in_executor(None, self._cancellable_query, llm, revise_prompt, [], llm_model, True, sid, web_search)
+            logger.info(f"[ScriptWriter] Final script generated ({len(full_script_text)} chars)")
+
+            _log_progress(60, "最终剧本生成完成，正在提取人物/场景信息...")
 
             # 2. Extract meta data -> total_episodes, characters, settings
             meta_prompt = _get_script_prompt("meta_extract", "zh" if is_zh else "en").format(script_text=full_script_text, outline=full_script_text)
@@ -289,7 +324,7 @@ class ScriptWriterAgent(AgentInterface):
             asset_sets_str = json.dumps([{"name": s.get("name"), "description": s.get("description")} for s in all_settings], ensure_ascii=False)
 
             # 3. 解析各集数据 - 针对新版数组输出格式进行优化
-            _log_progress(70, "开始结构化全集数据...")
+            _log_progress(80, "开始结构化全集数据...")
             
             extract_prompt = _get_script_prompt("act_extract", "zh" if is_zh else "en").format(
                 script_text=full_script_text

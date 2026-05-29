@@ -252,11 +252,7 @@ class ReferenceGeneratorAgent(AgentInterface):
             self._check_cancel()
 
             style_prompt = self._get_style_prompt(style)
-            full_prompt = (
-                f"{style_prompt}, masterpiece, cinematic composition, "
-                f"best quality, high resolution, "
-                f"{first_frame_prompt}"
-            )
+            full_prompt = f"{style_prompt}, {first_frame_prompt}"
 
             save_path = self._next_version_path(sid, segment_id)
             save_dir = os.path.dirname(save_path)
@@ -420,30 +416,41 @@ class ReferenceGeneratorAgent(AgentInterface):
 
     # ─── 构建最终 payload ───
 
-    def _build_payload(self, sid: str, segments: list, session_data: dict = None) -> dict:
+    def _build_payload(self, sid: str, segments: list, session_data: dict = None, prompts_map: dict = None, selected_images: dict = None) -> dict:
         """构建最终 payload"""
         scenes = []
+        if prompts_map is None:
+            prompts_map = {}
+        if selected_images is None:
+            selected_images = {}
 
         # 建立 scene_id 到 selected 路径的映射
         selected_map = {}
+        existing_prompts = {}
         if session_data and "artifacts" in session_data:
             ref_gen = session_data["artifacts"].get("reference_generation", {})
             for scene in ref_gen.get("scenes", []):
                 sid_in_json = scene.get("id")
                 if sid_in_json:
                     selected_map[sid_in_json] = scene.get("selected", "")
+                    existing_prompts[sid_in_json] = scene.get("visual_prompt", "")
 
         for idx, seg in enumerate(segments, 1):
             segment_id = seg.get('segment_id', f'seg_unk_{idx}')
             versions = self._list_versions(sid, segment_id)
             
-            # 优先从 artifacts 中读取 selected 字段
-            selected_path = selected_map.get(segment_id)
+            # 优先从本轮生成的 selected_images 中读取，如果找不到，再从 session 的 artifacts 中读取 selected 字段
+            selected_path = selected_images.get(segment_id)
+            if not selected_path:
+                selected_path = selected_map.get(segment_id)
             if not selected_path:
                 selected_path = versions[-1] if versions else ""
 
             # 获取该段下第一个镜头的 content 作为片段描述
             shots_summary = seg.get('shots', [])[0].get('content', '') if seg.get('shots') else ""
+            
+            # 取提示词
+            visual_prompt = prompts_map.get(segment_id) or existing_prompts.get(segment_id) or ""
 
             # status: 有图片=done, 无图片=pending(待生成)
             status = "done" if versions else "pending"
@@ -452,6 +459,7 @@ class ReferenceGeneratorAgent(AgentInterface):
                 "name": f"第{seg.get('episode_number', 1)}集-片段{seg.get('segment_number', idx)}",
                 "index": idx,
                 "description": shots_summary,
+                "visual_prompt": visual_prompt,
                 "selected": selected_path,
                 "versions": versions,
                 "status": status,
@@ -502,6 +510,15 @@ class ReferenceGeneratorAgent(AgentInterface):
             session_data = json.load(f)
             
         artifacts = session_data.get("artifacts", {})
+        
+        # 提取已经存在于 session 中的 visual_prompts
+        session_visual_prompts = {}
+        ref_gen = artifacts.get("reference_generation", {})
+        for scene in ref_gen.get("scenes", []):
+            sid_in_json = scene.get("id")
+            vp = scene.get("visual_prompt")
+            if sid_in_json and vp:
+                session_visual_prompts[sid_in_json] = vp
 
         img_client = ImageClient(
             dashscope_api_key=settings.DASHSCOPE_API_KEY,
@@ -592,21 +609,27 @@ class ReferenceGeneratorAgent(AgentInterface):
                         plot = first_shot.get('content', '')
                         char_desc, set_desc = self._get_descriptions(seg, char_id_map, setting_id_map, character_json)
 
-                        ff_prompt_tpl = load_prompt('reference', 'first_frame', 'zh' if is_zh else 'en')
-                        ff_prompt_resp = self._cancellable_query(
-                            llm,
-                            prompt=ff_prompt_tpl.format(
-                                original_text=script_json.get("original_text", ""),
-                                plot=plot,
-                                character_description=char_desc,
-                                setting_description=set_desc
-                            ),
-                            model=llm_model
-                        )
-                        if hasattr(ff_prompt_resp, 'content'):
-                            ff_prompt = ff_prompt_resp.content.strip()
+                        existing_vp = session_visual_prompts.get(segment_id)
+                        if existing_vp:
+                            ff_prompt = existing_vp
+                            logger.info(f"[{segment_id}] 重新生成时命中已有提示词，复用原提示词...")
                         else:
-                            ff_prompt = str(ff_prompt_resp).strip()
+                            ff_prompt_tpl = load_prompt('reference', 'first_frame', 'zh' if is_zh else 'en')
+                            ff_prompt_resp = self._cancellable_query(
+                                llm,
+                                prompt=ff_prompt_tpl.format(
+                                    original_text=script_json.get("original_text", ""),
+                                    plot=plot,
+                                    character_description=char_desc,
+                                    setting_description=set_desc
+                                ),
+                                model=llm_model
+                            )
+                            if hasattr(ff_prompt_resp, 'content'):
+                                ff_prompt = ff_prompt_resp.content.strip()
+                            else:
+                                ff_prompt = str(ff_prompt_resp).strip()
+                                
                         prompt_map[segment_id] = ff_prompt
                         
                         logger.info(f"[{segment_id}] first-frame prompt: {ff_prompt}...")
@@ -670,7 +693,7 @@ class ReferenceGeneratorAgent(AgentInterface):
                 await loop.run_in_executor(None, regen_run)
 
                 self._report_progress("参考图", "完成", 100)
-                return self._build_payload(sid, fresh_segments, session_data)
+                return self._build_payload(sid, fresh_segments, session_data, prompt_map, selected_images)
 
         # ═══ 正常流程：全量生成 ═══
         self._report_progress("参考图", "加载分镜数据...", 5)
@@ -680,11 +703,14 @@ class ReferenceGeneratorAgent(AgentInterface):
         self._report_progress("参考图", "加载分镜列表", 8, data={"assets_preview": {"scenes": preview}})
 
         llm = LLM()
+        first_frame_prompts = {}  # 提升作用域，用于最后写回结果文件
+        selected_images_map = {}  # 提升作用域，记录本轮新生成且 VLM 挑选出来的图片路径
 
         def run():
+            nonlocal first_frame_prompts
+            nonlocal selected_images_map
             # 筛选需要生成的（跳过已有图的）
             pending_segments = []
-            selected_images = {}
             for seg in segments:
                 segment_id = seg['segment_id']
                 existing = self._list_versions(sid, segment_id)
@@ -710,8 +736,6 @@ class ReferenceGeneratorAgent(AgentInterface):
             # 步骤2-6(每片段)：流式生成提示词并立即开始图像生成
             self._report_progress("参考图", "开始生成...", calc_pct(0))
             
-            first_frame_prompts = {}  # 用于最后写回结果文件
-            
             with ThreadPoolExecutor(max_workers=concurrency) as executor:
                 futs = {}
                 done = 0
@@ -723,26 +747,31 @@ class ReferenceGeneratorAgent(AgentInterface):
                     first_shot = seg.get('shots', [])[0] if seg.get('shots') else {}
                     plot = first_shot.get('content', '')
                     char_desc, set_desc = self._get_descriptions(seg, char_id_map, setting_id_map, character_json)
-                    ff_prompt_tpl = load_prompt('reference', "first_frame", 'zh' if is_zh else 'en')
                     
-                    try:
-                        ff_prompt_resp = self._cancellable_query(
-                            llm,
-                            prompt=ff_prompt_tpl.format(
-                                original_text=script_json.get("original_text", ""),
-                                plot=plot,
-                                character_description=char_desc,
-                                setting_description=set_desc
-                            ),
-                            model=llm_model
-                        )
-                        if hasattr(ff_prompt_resp, 'content'):
-                            ff_prompt = ff_prompt_resp.content.strip()
-                        else:
-                            ff_prompt = str(ff_prompt_resp).strip()
-                    except Exception as e:
-                        logger.error(f"Error generating first-frame prompt for {segment_id}: {e}")
-                        ff_prompt = plot[:200]
+                    existing_vp = session_visual_prompts.get(segment_id)
+                    if existing_vp:
+                        ff_prompt = existing_vp
+                        logger.info(f"[{segment_id}] 命中已有提示词，复用原提示词...")
+                    else:
+                        ff_prompt_tpl = load_prompt('reference', "first_frame", 'zh' if is_zh else 'en')
+                        try:
+                            ff_prompt_resp = self._cancellable_query(
+                                llm,
+                                prompt=ff_prompt_tpl.format(
+                                    original_text=script_json.get("original_text", ""),
+                                    plot=plot,
+                                    character_description=char_desc,
+                                    setting_description=set_desc
+                                ),
+                                model=llm_model
+                            )
+                            if hasattr(ff_prompt_resp, 'content'):
+                                ff_prompt = ff_prompt_resp.content.strip()
+                            else:
+                                ff_prompt = str(ff_prompt_resp).strip()
+                        except Exception as e:
+                            logger.error(f"Error generating first-frame prompt for {segment_id}: {e}")
+                            ff_prompt = plot[:200]
                     
                     first_frame_prompts[segment_id] = ff_prompt
                     logger.info(f"[{segment_id}] Prompt ready, starting image generation...")
@@ -784,7 +813,7 @@ class ReferenceGeneratorAgent(AgentInterface):
                     pct = calc_pct(step)
                     
                     if result_path:
-                        selected_images[segment_id_done] = result_path
+                        selected_images_map[segment_id_done] = result_path
                         versions = self._list_versions(sid, segment_id_done)
                         self._report_progress("参考图", f"完成: {segment_id_done}", pct, data={
                             "asset_complete": {
@@ -824,8 +853,8 @@ class ReferenceGeneratorAgent(AgentInterface):
             if "cancel" in str(e).lower():
                 logger.info("ReferenceGeneratorAgent: 用户取消，返回已完成部分结果")
                 self._report_progress("参考图", "已取消（保留已完成图片）", 100)
-                return self._build_payload(sid, segments, session_data)
+                return self._build_payload(sid, segments, session_data, first_frame_prompts, selected_images_map)
             raise
 
         self._report_progress("参考图", "完成", 100)
-        return self._build_payload(sid, segments, session_data)
+        return self._build_payload(sid, segments, session_data, first_frame_prompts, selected_images_map)

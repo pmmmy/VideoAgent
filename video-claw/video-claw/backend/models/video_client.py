@@ -112,6 +112,9 @@ class VideoClient:
         if not model:
             model = "wan2.7-i2v"
 
+        # 确保 duration 是整数,视频模型通常要求整数秒
+        duration = int(duration)
+
         if Config.PRINT_MODEL_INPUT:
             lines = [
                 "---- VIDEO GENERATION REQUEST ----",
