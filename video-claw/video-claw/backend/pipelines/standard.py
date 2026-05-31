@@ -322,7 +322,7 @@ async def run(task_id: str, params: dict) -> tuple[dict, list[dict]]:
             narration,
             output_path=audio_path,
             voice=params.get("tts_voice", "zh-CN-YunjianNeural"),
-            speed=float(params.get("tts_speed", 1.2)),
+            speed=float(params.get("tts_speed", 1.0)),
         )
         audios.append(audio_path)
         audio_artifact = artifact(audio_path, "audio", f"audio_{idx:02d}")
