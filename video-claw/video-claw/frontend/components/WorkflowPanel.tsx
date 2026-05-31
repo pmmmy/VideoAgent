@@ -113,7 +113,7 @@ export default function WorkflowPanel() {
     return () => { pollRef.current = null; };
   }, []);
 
-  // 轮询等待后端阶段完成（从 sessions json 读取，支持后端重启后恢复）
+  // 轮询等待后端阶段完成。运行中优先读后端内存，后端重启后再回退到磁盘快照。
   const pollForCompletion = useCallback(async (sid: string, stageId: string) => {
     const key = `${sid}:${stageId}`;
     pollRef.current = key;
@@ -121,13 +121,11 @@ export default function WorkflowPanel() {
       await new Promise(r => setTimeout(r, 2000));
       if (pollRef.current !== key) return;
       try {
-        // 优先从 sessions json 读取（支持后端重启后恢复）
         let status: any;
         try {
-          status = await getProjectStatusFromDisk(sid);
-        } catch {
-          // 如果从磁盘读取失败，回退到内存状态
           status = await getProjectStatus(sid);
+        } catch {
+          status = await getProjectStatusFromDisk(sid);
         }
         if (pollRef.current !== key) return;
         setGlobalStatusMap(status.status || {});
@@ -1017,12 +1015,11 @@ export default function WorkflowPanel() {
     const stageParam = targetStage ? `&stage=${targetStage}` : '';
     router.push(`/?session=${sid}${stageParam}`);
     try {
-      // 优先从 sessions json 读取（支持后端重启后恢复）
       let status: any;
       try {
-        status = await getProjectStatusFromDisk(sid);
-      } catch {
         status = await getProjectStatus(sid);
+      } catch {
+        status = await getProjectStatusFromDisk(sid);
       }
       setGlobalStatusMap(status.status || {});
       const newStates = initStageStates();
@@ -1077,11 +1074,12 @@ export default function WorkflowPanel() {
         }
       }
 
-      // 恢复项目参数（从顶层字段读取，sessions json 中模型参数是顶层字段）
-      if ((status as any).idea) {
-        const s = status as any;
+      // 恢复项目参数：会话级生成配置统一从 meta 中读取，兼容少量旧扁平字段。
+      const meta = ((status as any).meta || {}) as any;
+      const s = Object.keys(meta).length > 0 ? meta : (status as any);
+      if (s.idea || s.user_textbox_input) {
         setProjectParams({
-          idea: s.idea || '',
+          idea: s.idea || s.user_textbox_input || '',
           style: s.style || '',
           video_ratio: s.video_ratio || '16:9',
           video_resolution: s.video_resolution || '720P',
@@ -1189,6 +1187,7 @@ export default function WorkflowPanel() {
   const hasWaiting = Object.values(stageStates).some(s => s.status === 'waiting');
   const hasError = Object.values(stageStates).some(s => s.status === 'error');
   const allCompleted = Object.values(stageStates).every(s => s.status === 'completed' || s.status === 'pending');
+  const effectiveIsRunning = isRunning || hasRunning;
 
   let computedStatus: string;
   if (hasRunning) computedStatus = 'running';
@@ -1264,7 +1263,7 @@ export default function WorkflowPanel() {
         onUpdateArtifact={(patch: Record<string, any>) => handleUpdateArtifact(activeStage, patch)}
         onSaveSelections={(selections: Record<string, any>) => handleSaveSelections(activeStage, selections)}
         showConfirm={showConfirm}
-        isRunning={isRunning}
+        isRunning={effectiveIsRunning}
         hasPendingItems={hasPendingItems}
         hasNextStageStarted={hasNextStageStarted}
         videoSound={videoSound}
@@ -1293,7 +1292,7 @@ export default function WorkflowPanel() {
         onStageClick={handleStageClick}
         onHomeClick={handleGoHome}
         hasSession={sessionId !== null}
-        isRunning={isRunning}
+        isRunning={effectiveIsRunning}
         onStop={handleStop}
         autoMode={autoMode}
         onAutoModeChange={setAutoMode}

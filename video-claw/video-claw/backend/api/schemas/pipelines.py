@@ -27,7 +27,7 @@ class StandardPipelineRequest(BaseModel):
     template_media_kind: Literal["image", "video"] = "image"
     video_duration: int = 5
     tts_voice: str = "zh-CN-YunjianNeural"
-    tts_speed: float = 1.2
+    tts_speed: float = 1.0
     negative_prompt: Optional[str] = None
     watermark: Optional[bool] = None
     generate_audio_native: Optional[bool] = None
@@ -62,7 +62,7 @@ class DigitalHumanPipelineRequest(BaseModel):
     video_resolution: Optional[str] = None
     resolution: Optional[str] = None
     tts_voice: str = "zh-CN-YunjianNeural"
-    tts_speed: float = 1.2
+    tts_speed: float = 1.0
     negative_prompt: Optional[str] = None
     watermark: Optional[bool] = None
     prompt_extend: Optional[bool] = None

@@ -272,10 +272,10 @@ export async function getProjectStatus(sessionId: string): Promise<ProjectStatus
   return resp.json();
 }
 
-// 从 sessions json 文件读取状态（供前端轮询使用，即使后端重启也能获取状态）
+// 兼容旧路由名；后端实际会通过统一的 workflow state 入口返回状态。
 export async function getProjectStatusFromDisk(sessionId: string): Promise<any> {
   const resp = await fetch(`/api/project/${sessionId}/status/from_disk`);
-  if (!resp.ok) throw new Error('Failed to get project status from disk');
+  if (!resp.ok) throw new Error('Failed to get project status snapshot');
   return resp.json();
 }
 

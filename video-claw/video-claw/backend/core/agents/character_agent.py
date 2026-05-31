@@ -368,46 +368,29 @@ class CharacterDesignerAgent(AgentInterface):
 
     # ─── 从剧本JSON读取角色/场景数据 ───
 
-    @staticmethod
-    def _read_script_data(sid: str) -> dict:
-        """从 code/data/sessions/{sid}.json 提取剧本生成的角色和场景数据"""
-        # Session 文件路径
-        session_path = os.path.join('code/data/sessions', f'{sid}.json')
-        
-        if not os.path.exists(session_path):
-            logger.warning(f"Session file not found: {session_path}")
-            return {"characters": {}, "settings": {}}
+    def _read_script_data(self, input_data: Dict) -> dict:
+        """从编排器注入的 script_generation artifact 提取角色和场景数据。"""
+        script_gen = self._session_artifact(input_data, "script_generation")
+        chars = {}
+        for c in script_gen.get("characters", []):
+            cid = c.get("character_id") or c.get("id") or ""
+            if cid:
+                chars[cid] = {
+                    "name": c.get("name", ""),
+                    "description": c.get("description", ""),
+                    "species": c.get("species", ""),
+                }
 
-        try:
-            with open(session_path, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-            
-            # 从 artifacts.script_generation 中提取数据
-            script_gen = data.get("artifacts", {}).get("script_generation", {})
-            
-            chars = {}
-            for c in script_gen.get("characters", []):
-                cid = c.get("character_id", "")
-                if cid:
-                    chars[cid] = {
-                        "name": c.get("name", ""),
-                        "description": c.get("description", ""),
-                        "species": c.get("species", ""),
-                    }
-                    
-            sets = {}
-            for s in script_gen.get("settings", []):
-                sid_val = s.get("setting_id", "")
-                if sid_val:
-                    sets[sid_val] = {
-                        "name": s.get("name", ""),
-                        "description": s.get("description", ""),
-                    }
-            
-            return {"characters": chars, "settings": sets}
-        except Exception as e:
-            logger.error(f"Error reading session data for {sid}: {e}")
-            return {"characters": {}, "settings": {}}
+        sets = {}
+        for s in script_gen.get("settings", []):
+            sid_val = s.get("setting_id") or s.get("id") or ""
+            if sid_val:
+                sets[sid_val] = {
+                    "name": s.get("name", ""),
+                    "description": s.get("description", ""),
+                }
+
+        return {"characters": chars, "settings": sets}
 
     # ─── 核心流程 ───
 
@@ -475,7 +458,7 @@ class CharacterDesignerAgent(AgentInterface):
 
             # 如果 input_data 为空（比如后端重启后的第一次介入），再读原始文件
             if not chars_desc and not sets_desc:
-                script_data = self._read_script_data(sid)
+                script_data = self._read_script_data(input_data)
                 chars_desc = script_data["characters"]
                 sets_desc = script_data["settings"]
 
@@ -509,41 +492,6 @@ class CharacterDesignerAgent(AgentInterface):
                         else:
                             # 简单字符串格式：直接更新 description
                             sets_desc[asset_id]["description"] = str(info)
-
-                # 写回会话数据文件
-                session_file = os.path.join('code/data/sessions', f'{sid}.json')
-                if os.path.exists(session_file):
-                    with open(session_file, 'r', encoding='utf-8') as f:
-                        session_data = json.load(f)
-                    
-                    # 更新 artifacts.script_generation 中的描述
-                    script_gen = session_data.get("artifacts", {}).get("script_generation", {})
-                    if script_gen:
-                        # 更新角色
-                        for c in script_gen.get("characters", []):
-                            cid = c.get("character_id")
-                            if cid in updated_chars:
-                                info = updated_chars[cid]
-                                if isinstance(info, dict):
-                                    if "name" in info: c["name"] = info["name"]
-                                    if "description" in info: c["description"] = info["description"]
-                                    if "species" in info: c["species"] = info["species"]
-                                else:
-                                    c["description"] = str(info)
-                        
-                        # 更新场景
-                        for s in script_gen.get("settings", []):
-                            sid_val = s.get("setting_id")
-                            if sid_val in updated_sets:
-                                info = updated_sets[sid_val]
-                                if isinstance(info, dict):
-                                    if "name" in info: s["name"] = info["name"]
-                                    if "description" in info: s["description"] = info["description"]
-                                else:
-                                    s["description"] = str(info)
-                                    
-                        with open(session_file, 'w', encoding='utf-8') as f:
-                            json.dump(session_data, f, ensure_ascii=False, indent=2)
 
                 logger.info(f"[CharacterAgent] Updated descriptions for session {sid}")
 
@@ -608,7 +556,7 @@ class CharacterDesignerAgent(AgentInterface):
                 sets_desc = input_data["settings"]
         
         if not chars_desc and not sets_desc:
-            script_data = self._read_script_data(sid)
+            script_data = self._read_script_data(input_data)
             chars_desc = script_data["characters"]
             sets_desc = script_data["settings"]
 

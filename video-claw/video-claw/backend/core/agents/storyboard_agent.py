@@ -31,18 +31,6 @@ class StoryboardAgent(AgentInterface):
     OPENING_SHOT_TYPES = {"中景", "全景"}
 
     @staticmethod
-    def _read_script_json(sid: str) -> dict:
-        session_path = os.path.join("code/data/sessions", f"{sid}.json")
-        if not os.path.exists(session_path):
-            return {}
-        try:
-            with open(session_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            return data.get("artifacts", {}).get("script_generation", {})
-        except Exception:
-            return {}
-
-    @staticmethod
     def _extract_json_array(text: str) -> Optional[List[dict]]:
         text = text.strip()
         text = re.sub(r"^```(?:json)?\s*", "", text)
@@ -1265,11 +1253,8 @@ class StoryboardAgent(AgentInterface):
         input_data = self._merge_session_params(input_data)
         sid = input_data.get("session_id")
         if not sid: raise Exception("Missing session_id")
-             
-        session_file = os.path.join("code/data/sessions", f"{sid}.json")
-        with open(session_file, "r", encoding="utf-8") as f:
-            session_data = json.load(f)
-        session_meta = session_data.get("meta") if isinstance(session_data.get("meta"), dict) else {}
+        artifacts = self._session_artifacts(input_data)
+        session_meta = self._session_meta(input_data)
             
         llm_model = input_data.get("llm_model") or session_meta.get("llm_model")
         if not llm_model:
@@ -1280,18 +1265,17 @@ class StoryboardAgent(AgentInterface):
         if intervention and "modified_storyboard" in intervention:
             modified_episodes = intervention["modified_storyboard"]
             if isinstance(modified_episodes, str): modified_episodes = json.loads(modified_episodes)
-            session_data.setdefault("artifacts", {})["storyboard"] = {
-                "session_id": sid,
-                "episodes": modified_episodes,
-                "user_modified": True,
-                "updated_at": datetime.now().isoformat()
+            return {
+                "payload": {
+                    "session_id": sid,
+                    "episodes": modified_episodes,
+                    "user_modified": True,
+                    "updated_at": datetime.now().isoformat(),
+                },
+                "stage_completed": True,
             }
-            # 更新顶层状态
-            session_data["updated_at"] = datetime.now().timestamp()
-            with open(session_file, "w", encoding="utf-8") as f: json.dump(session_data, f, indent=2, ensure_ascii=False)
-            return {"payload": {"session_id": sid, "episodes": modified_episodes}, "stage_completed": True}
         
-        script_data = self._read_script_json(sid)
+        script_data = artifacts.get("script_generation", {})
         if not script_data: raise Exception("未找到剧本数据")
         
         episodes = script_data.get("episodes", [])
@@ -1299,7 +1283,7 @@ class StoryboardAgent(AgentInterface):
             raise Exception("剧本数据中不包含有效集数列表(episodes)")
 
         # 检查是否有已存在的分镜数据，识别需要生成的集数
-        existing_storyboard = session_data.get("artifacts", {}).get("storyboard", {})
+        existing_storyboard = artifacts.get("storyboard", {})
         existing_story_eps = existing_storyboard.get("episodes", [])
         
         # 建立已生成的 segments 索引
@@ -1348,19 +1332,18 @@ class StoryboardAgent(AgentInterface):
                 "segments": segments
             }
 
-        # 核心：支持流式保存增量产物，让前端能看到实时进度
+        # 核心：支持流式推送增量产物，让前端能看到实时进度
         updated_ep_map = {e["episode_number"]: e for e in existing_story_eps}
         
-        # 立即先保存一次，确保已有的 episodes 在进入 running 状态后依然可见
-        session_data.setdefault("artifacts", {})["storyboard"] = {
-            "session_id": sid, 
-            "episodes": sorted(updated_ep_map.values(), key=lambda x: x["episode_number"]),
-            "created_at": datetime.now().isoformat()
-        }
-        with open(session_file, "w", encoding="utf-8") as f:
-            json.dump(session_data, f, indent=2, ensure_ascii=False)
-        # 报告一次进度，带上 asset_complete 强制前端从磁盘刷新一次初步数据
-        report_storyboard_note("准备生成分镜...", 10, {"asset_complete": True})
+        # 报告一次进度，带上 assets_preview 让编排器更新内存中的初步数据
+        report_storyboard_note("准备生成分镜...", 10, {
+            "assets_preview": {
+                "session_id": sid,
+                "episodes": sorted(updated_ep_map.values(), key=lambda x: x["episode_number"]),
+                "created_at": datetime.now().isoformat(),
+            },
+            "persist": True,
+        })
 
         results_queue = [asyncio.create_task(proc_ep(ep)) for ep in episodes_to_proc]
 
@@ -1369,37 +1352,25 @@ class StoryboardAgent(AgentInterface):
             completed_count += 1
             updated_ep_map[res["episode_number"]] = res
             
-            # 每完成一集分镜，立即持久化并触发增量同步
+            # 每完成一集分镜，通过编排器更新内存并受控持久化
             temp_eps = sorted(updated_ep_map.values(), key=lambda x: x["episode_number"])
-            session_data.setdefault("artifacts", {})["storyboard"] = {
-                "session_id": sid, 
-                "episodes": temp_eps, 
-                "created_at": datetime.now().isoformat()
-            }
-            with open(session_file, "w", encoding="utf-8") as f:
-                json.dump(session_data, f, indent=2, ensure_ascii=False)
             
             # 并发多集时只按已完成集数推进全局进度，避免各集内部进度互相覆盖。
             pct = min(95, 10 + int(85 * completed_count / max(total_to_process, 1)))
             report_storyboard_note(
                 f"已完成 {completed_count}/{total_to_process} 集分镜：第 {res['episode_number']} 集",
                 pct,
-                {"asset_complete": True},
+                {
+                    "assets_preview": {
+                        "session_id": sid,
+                        "episodes": temp_eps,
+                        "created_at": datetime.now().isoformat(),
+                    },
+                    "persist": True,
+                },
             )
 
         final_all_episodes = sorted(updated_ep_map.values(), key=lambda x: x["episode_number"])
         
-        # 核心：将结果持久化到 artifacts.storyboard
-        session_data.setdefault("artifacts", {})["storyboard"] = {
-            "session_id": sid, 
-            "episodes": final_all_episodes, 
-            "created_at": datetime.now().isoformat()
-        }
-        
-        session_data["updated_at"] = datetime.now().timestamp()
-
-        with open(session_file, "w", encoding="utf-8") as f: 
-            json.dump(session_data, f, indent=2, ensure_ascii=False)
-            
         self._report_progress("分镜", "完成", 100)
         return {"payload": {"session_id": sid, "episodes": final_all_episodes}, "stage_completed": True}

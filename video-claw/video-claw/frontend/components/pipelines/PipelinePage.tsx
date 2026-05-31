@@ -734,7 +734,7 @@ export default function PipelinePage({ pipeline, title, subtitle }: PipelinePage
   const [videoResolution, setVideoResolution] = useState('720P');
   const [duration, setDuration] = useState(5);
   const [ttsVoice, setTtsVoice] = useState('zh-CN-YunjianNeural');
-  const [ttsSpeed, setTtsSpeed] = useState(1.2);
+  const [ttsSpeed, setTtsSpeed] = useState(1);
   const [negativePrompt, setNegativePrompt] = useState(pipeline === 'standard' ? DEFAULT_STANDARD_STYLE_CONTROL : '');
 
   useEffect(() => {

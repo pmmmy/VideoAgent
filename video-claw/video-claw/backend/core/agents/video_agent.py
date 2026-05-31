@@ -1,16 +1,15 @@
 # -*- coding: utf-8 -*-
 """
-阶段5: 视频生成智能体 (适配 Session JSON 格式)
-- 从 session.json 的 artifacts["storyboard"] 读取拍摄片段(Segments)
+阶段5: 视频生成智能体
+- 从编排器注入的 artifacts["storyboard"] 读取拍摄片段(Segments)
 - 视频提示词：风格前缀 + 分镜列表(分镜1: [时长] content...)
-- 参考图：从 session.json 的 artifacts["reference_generation"] 读取
+- 参考图：从 artifacts["reference_generation"] 读取
 - 支持逐项并发生成、实时预览、重新生成
 """
 
 import os
 import re
 import glob
-import json
 import asyncio
 import logging
 from typing import Any, Optional, Dict, List
@@ -210,25 +209,8 @@ class VideoDirectorAgent(AgentInterface):
         }
 
     def _update_session_video_data(self, sid: str, segments: list, style_prompt: str) -> None:
-        """同步视频生成结果到 session.json 的 artifacts 中，适配前端读取"""
-        session_path = os.path.join('code/data/sessions', f'{sid}.json')
-        if not os.path.exists(session_path):
-            return
-
-        try:
-            with open(session_path, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-            
-            payload = self._build_payload(sid, segments, style_prompt)
-            data.setdefault("artifacts", {})["video_generation"] = payload["payload"]
-            
-            # 同时保留一份给后端的 scene2video (如果需要)
-            # data[sid]["scene2video"] = ... (可选)
-            
-            with open(session_path, 'w', encoding='utf-8') as f:
-                json.dump(data, f, indent=4, ensure_ascii=False)
-        except Exception as e:
-            logger.error(f"Failed to update session video data: {e}")
+        """保留兼容入口；session 状态统一由 WorkflowEngine 持久化。"""
+        return
 
     # ─── 核心流程 ───
 
@@ -242,28 +224,19 @@ class VideoDirectorAgent(AgentInterface):
         if intervention and "selected_clips" in intervention:
             selected_clips = intervention["selected_clips"] # Dict[segment_id, path]
             logger.info(f"[VideoAgent] 用户更新片段选择: {selected_clips}")
-            
-            session_path = os.path.join('code/data/sessions', f'{sid}.json')
-            if os.path.exists(session_path):
-                with open(session_path, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                
-                clips = data.get("artifacts", {}).get("video_generation", {}).get("clips", [])
-                for clip in clips:
-                    cid = clip.get("id")
-                    if cid in selected_clips:
-                        clip["selected"] = selected_clips[cid]
-                
-                with open(session_path, 'w', encoding='utf-8') as f:
-                    json.dump(data, f, indent=4, ensure_ascii=False)
-            
+
             # 返回当前状态
-            artifacts = data.get("artifacts", {})
+            artifacts = self._session_artifacts(input_data)
             episodes = artifacts.get('storyboard', {}).get('episodes', [])
             segments = []
             for ep in episodes:
                 segments.extend(ep.get("segments", []))
-            return self._build_payload(sid, segments)
+            payload = self._build_payload(sid, segments)
+            for clip in payload.get("payload", {}).get("clips", []):
+                clip_id = clip.get("id")
+                if clip_id in selected_clips:
+                    clip["selected"] = selected_clips[clip_id]
+            return payload
 
         video_model = self._require_input(input_data, "video_model")
         enable_concurrency = input_data.get("enable_concurrency", True)
@@ -273,13 +246,9 @@ class VideoDirectorAgent(AgentInterface):
         video_ratio = input_data.get("video_ratio", "16:9")
         video_resolution = input_data.get("video_resolution", "720P")
         video_shot_type = input_data.get("video_shot_type", "multi")
-        
-        # 加载会话数据
-        session_path = os.path.join('code/data/sessions', f'{sid}.json')
-        with open(session_path, 'r', encoding='utf-8') as f:
-            session_data = json.load(f)
-            
-        artifacts = session_data.get("artifacts", {})
+
+        artifacts = self._session_artifacts(input_data)
+        session_meta = self._session_meta(input_data)
         
         # 1. 获取拍摄片段列表 (从 Storyboard)
         episodes = artifacts.get('storyboard', {}).get('episodes', [])
@@ -296,7 +265,7 @@ class VideoDirectorAgent(AgentInterface):
         scene_list = ref_art.get('scenes', [])
         scene_map = {s['id']: s for s in scene_list if 'id' in s}
         
-        style_zh = session_data.get('style', 'realistic')
+        style_zh = input_data.get('style') or session_meta.get('style') or 'realistic'
         # 简单映射为中文显示名
         style_map_zh = {
             "anime": "动漫",

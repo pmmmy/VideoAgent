@@ -1,7 +1,9 @@
+import copy
 import json
 import os
 import time
 from datetime import datetime
+from types import SimpleNamespace
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
@@ -37,16 +39,6 @@ def _require_model_fields(values: dict) -> None:
         )
 
 
-def _session_file_path(session_id: str) -> str:
-    session_dir = os.path.join(
-        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-        'code',
-        'data',
-        'sessions',
-    )
-    return os.path.join(session_dir, f"{session_id}.json")
-
-
 @router.post("/api/project/start")
 async def start_project(req: ProjectStartRequest):
     final_idea = merge_uploaded_file_into_idea(req.idea, req.file_path)
@@ -54,11 +46,6 @@ async def start_project(req: ProjectStartRequest):
 
     session_id = str(int(time.time() * 1000))
     state = workflow_engine.get_or_create_state(session_id)
-    state.started_at = datetime.now()
-    if not isinstance(state.status, dict):
-        state.status = {}
-    state.status[state.current_stage.value] = "completed"
-
     meta = {
         "idea": final_idea,
         "user_textbox_input": req.idea,
@@ -75,12 +62,17 @@ async def start_project(req: ProjectStartRequest):
         "web_search": req.web_search if req.web_search is not None else False,
         "episodes": req.episodes if req.episodes is not None else 4,
     }
-    state.meta = meta
-    workflow_engine.save_session_to_disk(session_id, meta)
+    with workflow_engine._state_lock:
+        state.started_at = datetime.now()
+        if not isinstance(state.status, dict):
+            state.status = {}
+        state.status[state.current_stage.value] = "completed"
+        state.meta = meta
+        workflow_engine.save_session_to_disk(session_id, meta)
 
     return {
         "session_id": session_id,
-        "status": state.status,
+        "status": copy.deepcopy(state.status),
         "params": {
             "idea": final_idea,
             "file_path": req.file_path,
@@ -107,13 +99,17 @@ async def execute_stage(session_id: str, stage: str, request: Request):
         body = {}
 
     body["session_id"] = session_id
-    if state.meta:
-        for k, v in state.meta.items():
+    with workflow_engine._state_lock:
+        meta_snapshot = copy.deepcopy(state.meta)
+        artifact_snapshot = copy.deepcopy(state.artifacts)
+    if meta_snapshot:
+        for k, v in meta_snapshot.items():
             if v is not None and (k not in body or not body[k]):
                 body[k] = v
     _require_model_fields(body)
 
-    inject_user_selections(state, stage, body)
+    state_for_input = SimpleNamespace(artifacts=artifact_snapshot)
+    inject_user_selections(state_for_input, stage, body)
     cancellation_check, on_disconnect = make_cancellation(workflow_engine, session_id)
     progress_events, event_trigger, progress_callback = make_progress_channel()
 
@@ -145,16 +141,18 @@ async def get_project_status(session_id: str):
     state = workflow_engine.get_state(session_id)
     if not state:
         raise HTTPException(404, "Session not found")
-    return state.to_dict()
+    with workflow_engine._state_lock:
+        return state.to_dict()
 
 
 @router.get("/api/project/{session_id}/status/from_disk")
 async def get_project_status_from_disk(session_id: str):
-    session_file = _session_file_path(session_id)
-    if not os.path.exists(session_file):
+    # 兼容旧前端路由名；实际读取统一走 WorkflowEngine 的内存状态入口。
+    state = workflow_engine.get_state(session_id)
+    if not state:
         raise HTTPException(404, "Session not found")
-    with open(session_file, 'r', encoding='utf-8') as f:
-        return json.load(f)
+    with workflow_engine._state_lock:
+        return state.to_dict()
 
 
 @router.get("/api/project/{session_id}/artifact/{stage}")
@@ -163,22 +161,12 @@ async def get_artifact(session_id: str, stage: str):
     if not state:
         raise HTTPException(404, "Session not found")
 
-    session_file = _session_file_path(session_id)
-    if os.path.exists(session_file):
-        try:
-            with open(session_file, 'r', encoding='utf-8') as f:
-                disk_data = json.load(f)
-            disk_artifact = disk_data.get("artifacts", {}).get(stage)
-            if disk_artifact is not None:
-                state.artifacts[stage] = disk_artifact
-                return {"stage": stage, "artifact": disk_artifact}
-        except Exception:
-            pass
+    with workflow_engine._state_lock:
+        artifact = copy.deepcopy(state.artifacts.get(stage))
+    if artifact is not None:
+        return {"stage": stage, "artifact": artifact}
 
-    artifact = state.artifacts.get(stage)
-    if artifact is None:
-        raise HTTPException(404, f"Artifact for stage '{stage}' not found")
-    return {"stage": stage, "artifact": artifact}
+    raise HTTPException(404, f"Artifact for stage '{stage}' not found")
 
 
 @router.patch("/api/project/{session_id}/models")
@@ -188,71 +176,36 @@ async def update_models(session_id: str, request: Request):
         raise HTTPException(404, "Session not found")
     body = await request.json()
     allowed_keys = ("llm_model", "vlm_model", "image_t2i_model", "image_it2i_model", "video_model", "video_ratio", "video_resolution", "style", "enable_concurrency")
-    if not state.meta:
-        state.meta = {}
-    for k in allowed_keys:
-        if k in body:
-            state.meta[k] = body[k]
-    workflow_engine.save_session_to_disk(session_id)
+    with workflow_engine._state_lock:
+        if not state.meta:
+            state.meta = {}
+        for k in allowed_keys:
+            if k in body:
+                state.meta[k] = body[k]
+        workflow_engine.save_session_to_disk(session_id)
     return {"status": "ok"}
 
 
-@router.patch("/api/project/{session_id}/artifact/{stage}")
-async def update_artifact(session_id: str, stage: str, request: Request):
-    """保存用户在某阶段的选择/修改
-
-    数据存储策略：
-    - 用户修改只保存到 sessions json（state.artifacts）
-    - result/script json 只作为 LLM 初始生成，不接受用户修改
-
-    按阶段分类处理：
-    - 第二阶段(character_design): 修改 characters[]/settings[] 的 description
-    - 第三阶段(storyboard): 修改 episodes[]/segments[]/shots[] 的分镜数据
-    - 第四阶段(reference_generation): 修改 scenes[] 的 description（视觉提示词）
-    - 第五阶段(video_generation): 修改 clips[] 的 duration/description
-    """
-    state = workflow_engine.get_state(session_id)
-    if not state:
-        raise HTTPException(404, "Session not found")
-    body = await request.json()
-
-    # ══════════════════════════════════════════════════════════════
-    # 第二阶段：角色/背景描述修改
-    # 修改 characters[].description 或 settings[].description
-    # 不涉及跨阶段同步
-    # ══════════════════════════════════════════════════════════════
-    if stage == "character_design":
-        # 直接更新 body，由后续逻辑合并到 artifact
-        pass
-
-    # ══════════════════════════════════════════════════════════════
-    # 第三阶段：分镜修改
-    # 当前结构为 episodes -> segments -> shots；segments 对应一次视频模型调用
-    # 同步到：video_generation.clips[].duration, video_generation.clips[].description
-    # ══════════════════════════════════════════════════════════════
-    elif stage == "storyboard" and any(k in body for k in ("episodes", "segments", "shots")):
-        # 兼容旧 shots 格式：清除 is_new 标记
+def _apply_artifact_update(state, stage: str, body: dict):
+    """Apply a user edit to in-memory artifacts before the session is persisted."""
+    if stage == "storyboard" and any(k in body for k in ("episodes", "segments", "shots")):
         for shot in body.get('shots', []):
             if isinstance(shot, dict) and 'is_new' in shot:
                 shot['is_new'] = False
 
-        # 从 episodes/segments 提取同步信息
         input_segments = list(body.get('segments', []))
         for ep in body.get('episodes', []):
             if isinstance(ep, dict):
-                for seg in ep.get('segments', []):
-                    if isinstance(seg, dict):
-                        input_segments.append(seg)
+                input_segments.extend(seg for seg in ep.get('segments', []) if isinstance(seg, dict))
 
         seg_info_list = []
         for seg in input_segments:
             seg_id = seg.get('segment_id')
-            if not seg_id: continue
-            
+            if not seg_id:
+                continue
             shots = seg.get('shots', [])
             desc_video = " ".join([sh.get("plot") or sh.get("content") or "" for sh in shots]).strip()
             total_dur = seg.get("total_duration") or sum([sh.get("duration", 0) for sh in shots]) or 10
-            
             seg_info_list.append({
                 "segment_id": seg_id,
                 "desc": desc_video,
@@ -260,96 +213,63 @@ async def update_artifact(session_id: str, stage: str, request: Request):
                 "visual_prompt": seg.get("visual_prompt", ""),
             })
 
-        # 同步到 video_generation
         video_art = state.artifacts.get('video_generation', {})
-        if isinstance(video_art, dict) and 'clips' in video_art:
+        if isinstance(video_art, dict) and isinstance(video_art.get('clips'), list):
             for clip in video_art['clips']:
-                c_id = clip.get('id')
-                # 匹配 segment_id
-                target = next((item for item in seg_info_list if item["segment_id"] == c_id), None)
+                target = next((item for item in seg_info_list if item["segment_id"] == clip.get('id')), None)
                 if target:
                     clip['duration'] = target['duration']
                     clip['description'] = target['desc']
 
-        # 同步到 reference_generation
         ref_art = state.artifacts.get('reference_generation', {})
-        if isinstance(ref_art, dict) and 'scenes' in ref_art:
+        if isinstance(ref_art, dict) and isinstance(ref_art.get('scenes'), list):
             for scene in ref_art['scenes']:
-                s_id = scene.get('id')
-                target = next((item for item in seg_info_list if item["segment_id"] == s_id), None)
+                target = next((item for item in seg_info_list if item["segment_id"] == scene.get('id')), None)
                 if target and target.get("visual_prompt"):
                     scene['description'] = target['visual_prompt']
 
-        # 顶层 segments 是局部 patch 结构，不覆盖完整 storyboard artifact
         if "segments" in body and "episodes" not in body:
             body = {k: v for k, v in body.items() if k != "segments"}
+        body.pop('new_shot_ids', None)
 
-        # 清除 new_shot_ids 标记
-        if "new_shot_ids" in body:
-            del body['new_shot_ids']
-
-    # ══════════════════════════════════════════════════════════════
-    # 第四阶段：参考图提示词修改
-    # 修改 scenes[].description（视觉提示词）
-    # 同步到：storyboard.episodes[].segments[].visual_prompt
-    # ══════════════════════════════════════════════════════════════
     elif stage == "reference_generation":
         if "segments" in body:
-            # 修改视觉提示词 → 同步到 storyboard
-            # body.segments 是 [{segment_id: "...", visual_prompt: "..."}]
-            seg_id_to_prompt = {s['segment_id']: s.get('visual_prompt', '')
-                                for s in body['segments'] if 'segment_id' in s}
+            seg_id_to_prompt = {
+                s['segment_id']: s.get('visual_prompt', '')
+                for s in body['segments']
+                if isinstance(s, dict) and 'segment_id' in s
+            }
 
             storyboard_art = state.artifacts.get('storyboard', {})
-            # storyboard 结构: {episodes: [{segments: [...]}]}
             if isinstance(storyboard_art, dict):
-                episodes = storyboard_art.get('episodes', [])
-                for ep in episodes:
-                    if isinstance(ep, dict):
-                        for seg in ep.get('segments', []):
-                            if isinstance(seg, dict):
-                                seg_id = seg.get('segment_id')
-                                if seg_id in seg_id_to_prompt:
-                                    seg['visual_prompt'] = seg_id_to_prompt[seg_id]
+                for ep in storyboard_art.get('episodes', []):
+                    if not isinstance(ep, dict):
+                        continue
+                    for seg in ep.get('segments', []):
+                        if isinstance(seg, dict) and seg.get('segment_id') in seg_id_to_prompt:
+                            seg['visual_prompt'] = seg_id_to_prompt[seg.get('segment_id')]
 
-            # 同步到 reference_generation.scenes 的 description
             ref_art = state.artifacts.get('reference_generation', {})
             if isinstance(ref_art, dict):
-                scenes = ref_art.get('scenes', [])
-                for scene in scenes:
-                    if isinstance(scene, dict):
-                        scene_id = scene.get('id')
-                        if scene_id in seg_id_to_prompt:
-                            scene['description'] = seg_id_to_prompt[scene_id]
+                for scene in ref_art.get('scenes', []):
+                    if isinstance(scene, dict) and scene.get('id') in seg_id_to_prompt:
+                        scene['description'] = seg_id_to_prompt[scene.get('id')]
 
-            # 移除 segments，避免覆盖 reference_generation artifact
             body = {k: v for k, v in body.items() if k != "segments"}
 
-        # 处理图片版本选择 {sceneId: path}
         ref_art = state.artifacts.get('reference_generation', {})
         if isinstance(ref_art, dict):
             scenes = ref_art.get('scenes', [])
-            is_selection_format = any(
-                isinstance(k, str) and not isinstance(v, (list, dict))
-                for k, v in body.items()
-            )
+            is_selection_format = any(isinstance(k, str) and not isinstance(v, (list, dict)) for k, v in body.items())
             if is_selection_format and scenes:
                 for scene in scenes:
-                    scene_id = scene.get('id')
-                    if scene_id and scene_id in body:
-                        scene['selected'] = body[scene_id]
+                    if isinstance(scene, dict) and scene.get('id') in body:
+                        scene['selected'] = body[scene.get('id')]
                 body = {}
 
-    # ══════════════════════════════════════════════════════════════
-    # 第五阶段：视频片段修改
-    # 修改 clips[].duration / clips[].description
-    # 同步到：storyboard.episodes[].segments[].total_duration
-    # ══════════════════════════════════════════════════════════════
     elif stage == "video_generation":
-        # 收集 clips 的修改
         clip_id_to_duration = {}
         clip_id_to_description = {}
-
         for clip_id, value in body.items():
             if isinstance(value, dict):
                 if 'duration' in value:
@@ -357,48 +277,37 @@ async def update_artifact(session_id: str, stage: str, request: Request):
                 if 'description' in value:
                     clip_id_to_description[clip_id] = value['description']
 
-        # 同步到 storyboard 和 video_generation.clips
         if clip_id_to_duration or clip_id_to_description:
             storyboard_art = state.artifacts.get('storyboard', {})
-            # storyboard 结构: 从 shots 变更为了 episodes -> segments
             if isinstance(storyboard_art, dict):
-                episodes = storyboard_art.get('episodes', [])
-                for ep in episodes:
-                    if isinstance(ep, dict):
-                        for seg in ep.get('segments', []):
-                            if isinstance(seg, dict):
-                                seg_id = seg.get('segment_id')
-                                if seg_id in clip_id_to_duration:
-                                    seg['total_duration'] = clip_id_to_duration[seg_id]
+                for ep in storyboard_art.get('episodes', []):
+                    if not isinstance(ep, dict):
+                        continue
+                    for seg in ep.get('segments', []):
+                        if isinstance(seg, dict) and seg.get('segment_id') in clip_id_to_duration:
+                            seg['total_duration'] = clip_id_to_duration[seg.get('segment_id')]
 
-            # 更新 video_generation.clips 的 duration 和 description
             vid_art = state.artifacts.get('video_generation', {})
             if isinstance(vid_art, dict):
-                clips = vid_art.get('clips', [])
-                for clip in clips:
-                    if isinstance(clip, dict):
-                        clip_id = clip.get('id')
-                        if clip_id in clip_id_to_duration:
-                            clip['duration'] = clip_id_to_duration[clip_id]
-                        if clip_id in clip_id_to_description:
-                            clip['description'] = clip_id_to_description[clip_id]
+                for clip in vid_art.get('clips', []):
+                    if not isinstance(clip, dict):
+                        continue
+                    clip_id = clip.get('id')
+                    if clip_id in clip_id_to_duration:
+                        clip['duration'] = clip_id_to_duration[clip_id]
+                    if clip_id in clip_id_to_description:
+                        clip['description'] = clip_id_to_description[clip_id]
 
-        # 处理视频版本选择 {clipId: path}
         vid_art = state.artifacts.get('video_generation', {})
         if isinstance(vid_art, dict):
             clips = vid_art.get('clips', [])
-            is_selection_format = any(
-                isinstance(k, str) and not isinstance(v, (list, dict))
-                for k, v in body.items()
-            )
+            is_selection_format = any(isinstance(k, str) and not isinstance(v, (list, dict)) for k, v in body.items())
             if is_selection_format and clips:
                 for clip in clips:
-                    clip_id = clip.get('id')
-                    if clip_id and clip_id in body:
-                        clip['selected'] = body[clip_id]
+                    if isinstance(clip, dict) and clip.get('id') in body:
+                        clip['selected'] = body[clip.get('id')]
                 body = {}
 
-    # 更新 state.artifacts 并保存到 sessions json
     current = state.artifacts.get(stage)
     if current is None:
         state.artifacts[stage] = body
@@ -407,9 +316,23 @@ async def update_artifact(session_id: str, stage: str, request: Request):
     else:
         state.artifacts[stage] = body
 
-    workflow_engine.save_session_to_disk(session_id)
 
-    return {"status": "ok"}
+@router.patch("/api/project/{session_id}/artifact/{stage}")
+async def update_artifact(session_id: str, stage: str, request: Request):
+    """保存用户在某阶段的选择/修改，同时更新内存状态和磁盘快照。"""
+    state = workflow_engine.get_state(session_id)
+    if not state:
+        raise HTTPException(404, "Session not found")
+    body = await request.json()
+
+    with workflow_engine._state_lock:
+        _apply_artifact_update(state, stage, body if isinstance(body, dict) else {})
+        workflow_engine._recalculate_all_statuses(state)
+        workflow_engine.save_session_to_disk(session_id)
+        status_snapshot = copy.deepcopy(state.status)
+        artifact_snapshot = copy.deepcopy(state.artifacts.get(stage))
+
+    return {"status": "ok", "status_map": status_snapshot, "artifact": artifact_snapshot}
 
 
 
@@ -423,14 +346,18 @@ async def intervene(session_id: str, req: InterventionRequest, request: Request)
     cancellation_check, on_disconnect = make_cancellation(workflow_engine, session_id)
     progress_events, event_trigger, progress_callback = make_progress_channel()
 
-    current_artifact = state.artifacts.get(req.stage, {})
+    with workflow_engine._state_lock:
+        current_artifact = copy.deepcopy(state.artifacts.get(req.stage, {}))
+        meta_snapshot = copy.deepcopy(state.meta)
+        artifact_snapshot = copy.deepcopy(state.artifacts)
     input_data = current_artifact if isinstance(current_artifact, dict) else {}
     input_data["session_id"] = session_id
-    if state.meta:
-        for k, v in state.meta.items():
+    if meta_snapshot:
+        for k, v in meta_snapshot.items():
             if v is not None and k not in input_data:
                 input_data[k] = v
-    inject_user_selections(state, req.stage, input_data)
+    state_for_input = SimpleNamespace(artifacts=artifact_snapshot)
+    inject_user_selections(state_for_input, req.stage, input_data)
     input_data.update(req.modifications)
 
     return StreamingResponse(
@@ -473,6 +400,8 @@ async def stop_project(session_id: str):
 @router.get("/api/project/{session_id}/scene/{scene_number}/assets")
 async def check_scene_assets(session_id: str, scene_number: int):
     state = workflow_engine.get_state(session_id)
+    with workflow_engine._state_lock:
+        artifacts_snapshot = copy.deepcopy(state.artifacts) if state else {}
     result_file = os.path.join(settings.RESULT_DIR, 'script', f'{session_id}.json')
     if not os.path.exists(result_file):
         return {"scene_number": scene_number, "reference_images": 0, "videos": 0}
@@ -494,8 +423,8 @@ async def check_scene_assets(session_id: str, scene_number: int):
     shot_ids = [s.get('shot_id') for s in scene_shots if s.get('shot_id')]
 
     ref_artifact = script_data.get('reference_generation', {})
-    if not ref_artifact and state:
-        ref_artifact = state.artifacts.get('reference_generation', {})
+    if not ref_artifact:
+        ref_artifact = artifacts_snapshot.get('reference_generation', {})
 
     ref_scenes = ref_artifact.get('scenes', []) if isinstance(ref_artifact, dict) else []
     ref_image_count = 0
@@ -510,8 +439,8 @@ async def check_scene_assets(session_id: str, scene_number: int):
                     ref_image_count += 1
 
     video_artifact = script_data.get('video_generation', {})
-    if not video_artifact and state:
-        video_artifact = state.artifacts.get('video_generation', {})
+    if not video_artifact:
+        video_artifact = artifacts_snapshot.get('video_generation', {})
 
     video_clips = video_artifact.get('clips', []) if isinstance(video_artifact, dict) else []
     video_count = 0

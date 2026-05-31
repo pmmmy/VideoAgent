@@ -550,7 +550,7 @@ class ReferenceGeneratorAgent(AgentInterface):
         from models.image_client import ImageClient
         from models.llm_client import LLM
 
-        # 从 session.json 补齐缺失的参数（关键修复：防止前端漏传导致的默认值回退）
+        # 从编排器注入的 session 快照补齐缺失参数，避免各阶段直接读取 session JSON。
         input_data = self._merge_session_params(input_data)
 
         sid = input_data["session_id"]
@@ -572,15 +572,11 @@ class ReferenceGeneratorAgent(AgentInterface):
         concurrency = max(max_t2i, max_it2i)
         logger.info(f"[ReferenceAgent] 使用并发数={concurrency}")
 
-        # 读取会话数据
-        session_path = os.path.join('code/data/sessions', f'{sid}.json')
-        if not os.path.exists(session_path):
-            raise Exception(f"Session file not found: {session_path}")
-            
-        with open(session_path, 'r', encoding='utf-8') as f:
-            session_data = json.load(f)
-            
-        artifacts = session_data.get("artifacts", {})
+        artifacts = self._session_artifacts(input_data)
+        session_data = {
+            "meta": self._session_meta(input_data),
+            "artifacts": artifacts,
+        }
         
         # 提取已经存在于 session 中的 visual_prompts
         session_visual_prompts = {}
@@ -617,7 +613,6 @@ class ReferenceGeneratorAgent(AgentInterface):
 
         script_json = artifacts.get('script_generation', {})
         character_json = artifacts.get('character_design', {})
-        result_file = os.path.join('code/data/sessions', f'{sid}.json')
 
         # 判断中英文
         is_zh = any('\u4e00' <= c <= '\u9fff' for c in script_json.get("title", ""))
@@ -642,11 +637,7 @@ class ReferenceGeneratorAgent(AgentInterface):
             if regen_scenes:
                 self._report_progress("参考图", "重新生成中...", 2)
 
-                # 重新从 session JSON 文件读取最新的 storyboard 数据
-                with open(session_path, 'r', encoding='utf-8') as f:
-                    fresh_data = json.load(f)
-                fresh_artifacts = fresh_data.get('artifacts', {})
-                fresh_episodes = fresh_artifacts.get('storyboard', {}).get('episodes', [])
+                fresh_episodes = artifacts.get('storyboard', {}).get('episodes', [])
                 
                 fresh_segments = []
                 for ep in fresh_episodes:

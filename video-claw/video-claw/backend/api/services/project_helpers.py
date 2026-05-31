@@ -1,4 +1,5 @@
 import asyncio
+import copy
 import json
 import queue
 import threading
@@ -131,9 +132,7 @@ async def stream_workflow_task(
                     break
 
             if await request.is_disconnected():
-                if on_disconnect:
-                    on_disconnect()
-                yield json.dumps({"type": "error", "content": "Client disconnected"}) + "\n"
+                workflow_engine.track_background_task(task)
                 return
 
         while not progress_events.empty():
@@ -145,11 +144,13 @@ async def stream_workflow_task(
 
         result = task.result()
         workflow_engine.save_session_to_disk(state.session_id)
+        with workflow_engine._state_lock:
+            status_snapshot = copy.deepcopy(state.status)
 
         payload = {
             "type": "stage_complete",
             "stage": stage,
-            "status": state.status,
+            "status": status_snapshot,
             "requires_intervention": result.get("requires_intervention", False),
             "openclaw": build_openclaw_message(stage, result),
         }

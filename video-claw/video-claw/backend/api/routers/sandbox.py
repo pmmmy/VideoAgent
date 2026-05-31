@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import threading
 import uuid
 from datetime import datetime
 from typing import List
@@ -24,6 +25,7 @@ logger = logging.getLogger(__name__)
 SANDBOX_DIR = os.path.join(settings.CODE_DIR, "result", "sandbox")
 SANDBOX_HISTORY_FILE = os.path.join(SANDBOX_DIR, "history.json")
 SANDBOX_ACTIVE_TASKS: dict[str, dict] = {}
+SANDBOX_LOCK = threading.RLock()
 
 # 确保目录存在
 os.makedirs(SANDBOX_DIR, exist_ok=True)
@@ -31,20 +33,24 @@ os.makedirs(SANDBOX_DIR, exist_ok=True)
 
 def _load_history() -> List[dict]:
     """加载历史记录"""
-    if os.path.exists(SANDBOX_HISTORY_FILE):
-        try:
-            with open(SANDBOX_HISTORY_FILE, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except Exception:
-            logger.warning("Failed to load sandbox history: %s", SANDBOX_HISTORY_FILE, exc_info=True)
-            return []
-    return []
+    with SANDBOX_LOCK:
+        if os.path.exists(SANDBOX_HISTORY_FILE):
+            try:
+                with open(SANDBOX_HISTORY_FILE, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+            except Exception:
+                logger.warning("Failed to load sandbox history: %s", SANDBOX_HISTORY_FILE, exc_info=True)
+                return []
+        return []
 
 
 def _save_history(history: List[dict]):
     """保存历史记录"""
-    with open(SANDBOX_HISTORY_FILE, 'w', encoding='utf-8') as f:
-        json.dump(history, f, ensure_ascii=False, indent=2)
+    with SANDBOX_LOCK:
+        tmp_path = f"{SANDBOX_HISTORY_FILE}.{uuid.uuid4().hex}.tmp"
+        with open(tmp_path, 'w', encoding='utf-8') as f:
+            json.dump(history, f, ensure_ascii=False, indent=2)
+        os.replace(tmp_path, SANDBOX_HISTORY_FILE)
 
 
 def _normalize_path(path: str) -> str:
@@ -88,40 +94,43 @@ def _convert_output_paths(output_data: dict) -> dict:
 
 def _add_record(tool: str, model: str, input_data: dict, output_data: dict, files: List[str] = None, record_id: str | None = None) -> str:
     """添加历史记录"""
-    record_id = record_id or str(uuid.uuid4().hex[:8])
-    # 转换路径为相对路径格式
-    output_data = _convert_output_paths(output_data)
-    record = {
-        "id": record_id,
-        "tool": tool,
-        "model": model,
-        "input": input_data,
-        "output": output_data,
-        "files": files or [],
-        "created_at": datetime.now().isoformat(),
-    }
-    history = _load_history()
-    history.insert(0, record)  # 最新记录放在最前面
-    _save_history(history)
-    return record_id
+    with SANDBOX_LOCK:
+        record_id = record_id or str(uuid.uuid4().hex[:8])
+        # 转换路径为相对路径格式
+        output_data = _convert_output_paths(output_data)
+        record = {
+            "id": record_id,
+            "tool": tool,
+            "model": model,
+            "input": input_data,
+            "output": output_data,
+            "files": files or [],
+            "created_at": datetime.now().isoformat(),
+        }
+        history = _load_history()
+        history.insert(0, record)  # 最新记录放在最前面
+        _save_history(history)
+        return record_id
 
 
 def _start_active_task(tool: str, model: str, input_data: dict) -> str:
-    task_id = str(uuid.uuid4().hex[:8])
-    SANDBOX_ACTIVE_TASKS[task_id] = {
-        "id": task_id,
-        "tool": tool,
-        "model": model,
-        "input": input_data,
-        "status": "running",
-        "progress": 1,
-        "created_at": datetime.now().isoformat(),
-    }
-    return task_id
+    with SANDBOX_LOCK:
+        task_id = str(uuid.uuid4().hex[:8])
+        SANDBOX_ACTIVE_TASKS[task_id] = {
+            "id": task_id,
+            "tool": tool,
+            "model": model,
+            "input": input_data,
+            "status": "running",
+            "progress": 1,
+            "created_at": datetime.now().isoformat(),
+        }
+        return task_id
 
 
 def _finish_active_task(task_id: str) -> None:
-    SANDBOX_ACTIVE_TASKS.pop(task_id, None)
+    with SANDBOX_LOCK:
+        SANDBOX_ACTIVE_TASKS.pop(task_id, None)
 
 
 def _delete_record_files(files: List[str]):
@@ -160,7 +169,9 @@ async def sandbox_get_history():
 @router.get("/api/sandbox/tasks")
 async def sandbox_get_active_tasks():
     """获取临时工作台正在执行的任务"""
-    return {"success": True, "tasks": list(SANDBOX_ACTIVE_TASKS.values())}
+    with SANDBOX_LOCK:
+        tasks = list(SANDBOX_ACTIVE_TASKS.values())
+    return {"success": True, "tasks": tasks}
 
 
 @router.get("/api/sandbox/history/{record_id}")
@@ -176,21 +187,23 @@ async def sandbox_get_record(record_id: str):
 @router.delete("/api/sandbox/history/{record_id}")
 async def sandbox_delete_record(record_id: str):
     """删除历史记录"""
-    history = _load_history()
-    record_to_delete = None
-    new_history = []
-    for r in history:
-        if r["id"] == record_id:
-            record_to_delete = r
-        else:
-            new_history.append(r)
+    with SANDBOX_LOCK:
+        history = _load_history()
+        record_to_delete = None
+        new_history = []
+        for r in history:
+            if r["id"] == record_id:
+                record_to_delete = r
+            else:
+                new_history.append(r)
 
-    if record_to_delete is None:
-        return {"success": False, "error": "记录不存在"}
+        if record_to_delete is None:
+            return {"success": False, "error": "记录不存在"}
 
-    # 删除关联的文件
+        _save_history(new_history)
+
+    # 删除关联文件不需要占用历史锁。
     _delete_record_files(record_to_delete.get("files", []))
-    _save_history(new_history)
     logger.info("Sandbox history deleted: record_id=%s", record_id)
     return {"success": True}
 

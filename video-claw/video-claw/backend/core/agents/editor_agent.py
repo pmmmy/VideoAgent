@@ -6,7 +6,6 @@
 
 import os
 import re
-import json
 import asyncio
 import logging
 import subprocess
@@ -24,17 +23,11 @@ class VideoEditorAgent(AgentInterface):
         super().__init__(name="VideoEditor")
 
     async def process(self, input_data: Any, intervention: Optional[Dict] = None) -> Dict:
+        input_data = self._merge_session_params(input_data)
         sid = input_data["session_id"]
-        
-        # 优先从 session.json 的 artifacts 中读取阶段5的数据
-        session_path = os.path.join('code/data/sessions', f'{sid}.json')
-        if not os.path.exists(session_path):
-            raise Exception(f"Session file not found: {session_path}")
-            
-        with open(session_path, 'r', encoding='utf-8') as f:
-            session_data = json.load(f)
-            
-        artifacts = session_data.get("artifacts", {})
+
+        # 从编排器注入的统一 session 快照读取阶段5数据。
+        artifacts = self._session_artifacts(input_data)
         video_art = artifacts.get("video_generation", {})
         clips_list = video_art.get("clips", [])
         
@@ -148,16 +141,11 @@ class VideoEditorAgent(AgentInterface):
 
         self._report_progress("后期制作", "成片完成", 100)
 
-        # 同样将最终结果写入 artifacts
-        session_data.setdefault("artifacts", {})["post_production"] = {
-            "session_id": sid,
-            "final_videos": final_results,
-            "final_video": final_results[0]["path"] if final_results else "" # 兼容旧字段
-        }
-        with open(session_path, 'w', encoding='utf-8') as f:
-            json.dump(session_data, f, indent=4, ensure_ascii=False)
-
         return {
-            "payload": {"session_id": sid, "final_videos": final_results},
+            "payload": {
+                "session_id": sid,
+                "final_videos": final_results,
+                "final_video": final_results[0]["path"] if final_results else "",
+            },
             "stage_completed": True,
         }
