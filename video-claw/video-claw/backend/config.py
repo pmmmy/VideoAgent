@@ -17,7 +17,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "server": {
         "host": "127.0.0.1",
         "port": 8000,
-        "debug": False,
+        "log_level": "INFO",
         "access_log": False,
     },
     "api_providers": {
@@ -95,6 +95,7 @@ def _get(data: Dict[str, Any], path: str, default: Any = None) -> Any:
 def _coerce_config(data: Dict[str, Any]) -> Dict[str, Any]:
     clean = _deep_merge(DEFAULT_CONFIG, data)
     clean.pop("llm", None)
+    raw_server = data.get("server", {}) if isinstance(data, dict) else {}
 
     legacy_models = data.get("models", {}) if isinstance(data, dict) else {}
     if isinstance(legacy_models, dict):
@@ -109,7 +110,11 @@ def _coerce_config(data: Dict[str, Any]) -> Dict[str, Any]:
         server["port"] = int(server.get("port"))
     except (TypeError, ValueError):
         server["port"] = DEFAULT_CONFIG["server"]["port"]
-    server["debug"] = _as_bool(server.get("debug"))
+    server["log_level"] = _normalize_log_level(
+        server.get("log_level") if isinstance(raw_server, dict) and "log_level" in raw_server else None,
+        server.get("debug"),
+    )
+    server.pop("debug", None)
     server["access_log"] = _as_bool(server.get("access_log"))
     server.pop("admin_password", None)
 
@@ -150,6 +155,14 @@ def _as_bool(value: Any) -> bool:
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _normalize_log_level(value: Any, legacy_debug: Any = None) -> str:
+    allowed = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
+    if legacy_debug is not None and (value is None or str(value).strip() == ""):
+        return "DEBUG" if _as_bool(legacy_debug) else "INFO"
+    normalized = str(value or DEFAULT_CONFIG["server"]["log_level"]).strip().upper()
+    return normalized if normalized in allowed else DEFAULT_CONFIG["server"]["log_level"]
+
+
 def load_config() -> Dict[str, Any]:
     if not CONFIG_PATH.exists():
         source = CONFIG_EXAMPLE_PATH if CONFIG_EXAMPLE_PATH.exists() else None
@@ -181,7 +194,8 @@ class Config:
 
     HOST = _get(CONFIG, "server.host")
     PORT = _get(CONFIG, "server.port")
-    DEBUG = _get(CONFIG, "server.debug")
+    LOG_LEVEL = _get(CONFIG, "server.log_level")
+    DEBUG = LOG_LEVEL == "DEBUG"
     ACCESS_LOG = _get(CONFIG, "server.access_log")
 
     PRINT_MODEL_INPUT = _get(CONFIG, "api_providers.common.print_model_input")
@@ -252,7 +266,8 @@ class Config:
 
         cls.HOST = _get(clean, "server.host")
         cls.PORT = _get(clean, "server.port")
-        cls.DEBUG = _get(clean, "server.debug")
+        cls.LOG_LEVEL = _get(clean, "server.log_level")
+        cls.DEBUG = cls.LOG_LEVEL == "DEBUG"
         cls.ACCESS_LOG = _get(clean, "server.access_log")
 
         cls.PRINT_MODEL_INPUT = _get(clean, "api_providers.common.print_model_input")

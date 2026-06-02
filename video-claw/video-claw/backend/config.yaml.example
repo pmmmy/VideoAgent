@@ -2,7 +2,7 @@ project_name: Video-Claw
 server:
   host: 127.0.0.1
   port: 8000
-  debug: false
+  log_level: INFO
   access_log: false
 api_providers:
   common:

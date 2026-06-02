@@ -31,99 +31,107 @@ const EMPTY_MODEL_SELECTS: Record<ModelSelectKey, ProviderGroup[]> = {
   eval: [],
 };
 
+const LOG_LEVEL_OPTIONS = [
+  { id: 'DEBUG', label: 'DEBUG - 最详细' },
+  { id: 'INFO', label: 'INFO - 常规' },
+  { id: 'WARNING', label: 'WARNING - 仅警告及错误' },
+  { id: 'ERROR', label: 'ERROR - 仅错误' },
+  { id: 'CRITICAL', label: 'CRITICAL - 严重错误' },
+];
+
 const GROUPS: Array<{ title: string; description: string; fields: Field[] }> = [
   {
     title: 'API Server',
-    description: '服务启动与调试配置。host / port 保存后需要重启后端完全生效。',
+    description: '服务启动与日志配置。host / port 保存后需要重启后端完全生效。',
     fields: [
-      { path: 'server.host', label: 'host' },
-      { path: 'server.port', label: 'port', type: 'number' },
-      { path: 'server.debug', label: 'debug', type: 'boolean' },
-      { path: 'server.access_log', label: 'access_log', type: 'boolean' },
+      { path: 'server.host', label: 'host 主机地址' },
+      { path: 'server.port', label: 'port 端口', type: 'number' },
+      { path: 'server.log_level', label: 'log_level 日志层级', type: 'select', options: LOG_LEVEL_OPTIONS },
+      { path: 'server.access_log', label: 'access_log 请求访问日志', type: 'boolean' },
     ],
   },
   {
     title: 'Common Provider Settings',
     description: '模型调用公共配置和代理设置。',
     fields: [
-      { path: 'api_providers.common.print_model_input', label: 'print_model_input', type: 'boolean' },
-      { path: 'api_providers.common.proxy', label: 'proxy' },
+      { path: 'api_providers.common.print_model_input', label: 'print_model_input 打印模型输入', type: 'boolean' },
+      { path: 'api_providers.common.proxy', label: 'proxy 代理地址' },
     ],
   },
   {
     title: 'OpenAI',
     description: 'OpenAI / 兼容 OpenAI 接口配置。',
     fields: [
-      { path: 'api_providers.openai.api_key', label: 'api_key', type: 'password' },
-      { path: 'api_providers.openai.base_url', label: 'base_url' },
-      { path: 'api_providers.openai.enable_proxy', label: 'enable_proxy', type: 'boolean' },
+      { path: 'api_providers.openai.api_key', label: 'api_key API 密钥', type: 'password' },
+      { path: 'api_providers.openai.base_url', label: 'base_url 接口地址' },
+      { path: 'api_providers.openai.enable_proxy', label: 'enable_proxy 启用代理', type: 'boolean' },
     ],
   },
   {
     title: 'Gemini',
     description: 'Gemini 及兼容接口配置。',
     fields: [
-      { path: 'api_providers.gemini.api_key', label: 'api_key', type: 'password' },
-      { path: 'api_providers.gemini.base_url', label: 'base_url' },
-      { path: 'api_providers.gemini.enable_proxy', label: 'enable_proxy', type: 'boolean' },
+      { path: 'api_providers.gemini.api_key', label: 'api_key API 密钥', type: 'password' },
+      { path: 'api_providers.gemini.base_url', label: 'base_url 接口地址' },
+      { path: 'api_providers.gemini.enable_proxy', label: 'enable_proxy 启用代理', type: 'boolean' },
     ],
   },
   {
     title: 'DeepSeek',
     description: 'DeepSeek 接口配置。',
     fields: [
-      { path: 'api_providers.deepseek.api_key', label: 'api_key', type: 'password' },
-      { path: 'api_providers.deepseek.base_url', label: 'base_url' },
-      { path: 'api_providers.deepseek.enable_proxy', label: 'enable_proxy', type: 'boolean' },
+      { path: 'api_providers.deepseek.api_key', label: 'api_key API 密钥', type: 'password' },
+      { path: 'api_providers.deepseek.base_url', label: 'base_url 接口地址' },
+      { path: 'api_providers.deepseek.enable_proxy', label: 'enable_proxy 启用代理', type: 'boolean' },
     ],
   },
   {
     title: 'DashScope',
     description: '通义千问、通义万相等 DashScope 服务配置。',
     fields: [
-      { path: 'api_providers.dashscope.api_key', label: 'api_key', type: 'password' },
-      { path: 'api_providers.dashscope.base_url', label: 'base_url' },
-      { path: 'api_providers.dashscope.enable_proxy', label: 'enable_proxy', type: 'boolean' },
+      { path: 'api_providers.dashscope.api_key', label: 'api_key API 密钥', type: 'password' },
+      { path: 'api_providers.dashscope.base_url', label: 'base_url 接口地址' },
+      { path: 'api_providers.dashscope.enable_proxy', label: 'enable_proxy 启用代理', type: 'boolean' },
     ],
   },
   {
     title: 'ARK',
     description: 'Seedream / Seedance 使用的火山方舟配置。',
     fields: [
-      { path: 'api_providers.ark.api_key', label: 'api_key', type: 'password' },
-      { path: 'api_providers.ark.base_url', label: 'base_url' },
-      { path: 'api_providers.ark.enable_proxy', label: 'enable_proxy', type: 'boolean' },
+      { path: 'api_providers.ark.api_key', label: 'api_key API 密钥', type: 'password' },
+      { path: 'api_providers.ark.base_url', label: 'base_url 接口地址' },
+      { path: 'api_providers.ark.enable_proxy', label: 'enable_proxy 启用代理', type: 'boolean' },
     ],
   },
   {
     title: 'Kling',
     description: '可灵视频生成接口配置。',
     fields: [
-      { path: 'api_providers.kling.base_url', label: 'base_url' },
-      { path: 'api_providers.kling.access_key', label: 'access_key', type: 'password' },
-      { path: 'api_providers.kling.secret_key', label: 'secret_key', type: 'password' },
-      { path: 'api_providers.kling.enable_proxy', label: 'enable_proxy', type: 'boolean' },
+      { path: 'api_providers.kling.base_url', label: 'base_url 接口地址' },
+      { path: 'api_providers.kling.access_key', label: 'access_key 访问密钥', type: 'password' },
+      { path: 'api_providers.kling.secret_key', label: 'secret_key 私密密钥', type: 'password' },
+      { path: 'api_providers.kling.enable_proxy', label: 'enable_proxy 启用代理', type: 'boolean' },
     ],
   },
   {
     title: 'Default Models',
     description: '主流程和 Pipeline 使用的默认模型。',
     fields: [
-      { path: 'models.llm', label: 'llm', type: 'select', options: [] },
-      { path: 'models.vlm', label: 'vlm', type: 'select', options: [] },
-      { path: 'models.image_it2i', label: 'image_it2i', type: 'select', options: [] },
-      { path: 'models.image_t2i', label: 'image_t2i', type: 'select', options: [] },
-      { path: 'models.video', label: 'video', type: 'select', options: [] },
-      { path: 'models.eval', label: 'eval', type: 'select', options: [] },
+      { path: 'models.llm', label: 'llm 文本模型', type: 'select', options: [] },
+      { path: 'models.vlm', label: 'vlm 视觉语言模型', type: 'select', options: [] },
+      { path: 'models.image_it2i', label: 'image_it2i 图生图模型', type: 'select', options: [] },
+      { path: 'models.image_t2i', label: 'image_t2i 文生图模型', type: 'select', options: [] },
+      { path: 'models.video', label: 'video 视频模型', type: 'select', options: [] },
+      { path: 'models.eval', label: 'eval 评估模型', type: 'select', options: [] },
     ],
   },
   {
     title: '视频生成配置',
     description: '只对主流程生效：风格、画幅比例和视频分辨率。',
     fields: [
-      { path: 'generation.style', label: '风格', type: 'select', options: STYLES },
-      { path: 'generation.video_ratio', label: '视频长宽比', type: 'select', options: VIDEO_RATIOS },
-      { path: 'generation.video_resolution', label: '视频分辨率', type: 'select', options: VIDEO_RESOLUTIONS },
+      { path: 'generation.style', label: 'style 风格', type: 'select', options: STYLES },
+      { path: 'generation.video_ratio', label: 'video_ratio 视频长宽比', type: 'select', options: VIDEO_RATIOS },
+      { path: 'generation.video_resolution', label: 'video_resolution 视频分辨率', type: 'select', options: VIDEO_RESOLUTIONS },
     ],
   },
 ];

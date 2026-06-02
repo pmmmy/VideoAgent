@@ -12,6 +12,26 @@ def apply_access_log_setting():
     logging.getLogger("uvicorn.access").disabled = not Config.ACCESS_LOG
 
 
+def _managed_log_level() -> int:
+    level_name = str(getattr(Config, "LOG_LEVEL", "INFO") or "INFO").upper()
+    return getattr(logging, level_name, logging.INFO)
+
+
+def apply_log_level_setting():
+    """Apply the runtime log-level setting to the queue logger and known noisy loggers."""
+    level = _managed_log_level()
+    root_logger = logging.getLogger()
+    root_logger.setLevel(level)
+    for handler in root_logger.handlers:
+        handler.setLevel(level)
+    if _listener is not None:
+        for handler in getattr(_listener, "handlers", []):
+            handler.setLevel(level)
+    for name in ("uvicorn", "uvicorn.error", "uvicorn.access", "httpx", "httpcore"):
+        logger = logging.getLogger(name)
+        logger.setLevel(logging.WARNING if name in {"httpx", "httpcore"} else level)
+
+
 class AIGCFormatter(logging.Formatter):
     """Custom log formatter that adds level icons for better readability."""
 
@@ -52,8 +72,7 @@ def setup_concurrent_logging():
     if _listener is not None:
         return _listener
 
-    level_name = "DEBUG" if Config.DEBUG else "INFO"
-    level = getattr(logging, level_name, logging.INFO)
+    level = _managed_log_level()
 
     log_queue = queue.Queue(-1)
     console_handler = logging.StreamHandler(sys.stdout)
@@ -78,6 +97,7 @@ def setup_concurrent_logging():
         logger.handlers.clear()
         logger.propagate = True
         logger.setLevel(logging.WARNING if name in {"httpx", "httpcore"} else level)
+    apply_log_level_setting()
     apply_access_log_setting()
 
     _listener = listener
